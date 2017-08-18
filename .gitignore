@@ -1,3 +1,8 @@
+# Credentials, settings
+
+config.cfg
+credentials.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
