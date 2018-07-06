@@ -1,11 +1,15 @@
 import tkinter as tk
 from tkinter import ttk
 from tkinter import messagebox
+from tkinter import font
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import datetime
+import time
+import requests
 
 TITLE = "Countsheet Updater"
+CURRENT_WAREHOUSE = None
 
 
 class AutocompleteCombobox(ttk.Combobox):
@@ -71,7 +75,7 @@ class WHSheet(gspread.Worksheet):
     def __init__(self, sheet, worksheet):
         scope = ['https://spreadsheets.google.com/feeds']
         credentials = ServiceAccountCredentials.from_json_keyfile_name(
-            'credentials.json', scope)
+                       'credentials.json', scope)
         gc = gspread.authorize(credentials)
         sh = gc.open(sheet)
         self.ws = sh.worksheet(worksheet)
@@ -93,13 +97,49 @@ class WHSheet(gspread.Worksheet):
         self.ws.append_row(values)
 
 
-class MainApplication(tk.Frame):
-    def __init__(self, parent, inventory, sheet, history, *args, **kwargs):
+class SelectWindow(tk.Frame):
+    def __init__(self, parent, item_list, *args, **kwargs):
         tk.Frame.__init__(self, parent, *args, **kwargs)
         self.parent = parent
-        self.inventory = inventory
-        self.sheet = sheet
-        self.history = history
+        self.window = tk.Toplevel(self.parent)
+        self.window.grab_set()
+        self.window.focus()
+        self.window.geometry('450x650')
+        self.window.update()
+        self.item_list = sorted(item_list)
+
+        self.scrollbar = tk.Scrollbar(self.window, width=100)
+        self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.listbox = tk.Listbox(self.window, yscrollcommand=self.scrollbar.set, width=35)
+        for item in self.item_list:
+            self.listbox.insert(tk.END, item)
+        self.listbox.pack(side=tk.LEFT, fill=tk.BOTH)
+
+        self.scrollbar.config(command=self.listbox.yview)
+
+        self.listbox.bind('<<ListboxSelect>>', self.immediately)
+
+    def immediately(self, e):
+        self.parent.item.set(self.item_list[self.listbox.curselection()[0]])
+
+
+class MainApplication(tk.Frame):
+    def __init__(self, parent, #inventory, sheet, history,
+                 *args, **kwargs):
+        tk.Frame.__init__(self, parent, *args, **kwargs)
+        self.parent = parent
+        #self.inventory = inventory
+        #self.sheet = sheet
+        #self.history = history
+        # Make a menu bar
+        if not RESTRICTED:
+            self.menubar = tk.Menu(self.parent)
+            menu = tk.Menu(self.menubar, tearoff=0)
+            self.menubar.add_cascade(label="Change Warehouse", menu=menu)
+            menu.add_command(label="Townsend", command=self.townsend)
+            menu.add_command(label="Lakeland", command=self.lakeland)
+            self.parent.config(menu=self.menubar)
         # Get the item list
         self.item_list = []
         for i in range(1, 4):
@@ -109,14 +149,16 @@ class MainApplication(tk.Frame):
         self._item = AutocompleteCombobox(self.parent, textvariable=self.item,
                                           values=self.item_list)
         self._item.set_completion_list(self.item_list)
-        self._item.grid(row=0, column=1, columnspan=2, sticky=tk.W+tk.E)
+        self._item.grid(row=0, column=1, columnspan=3, sticky=tk.W+tk.E)
         self.action = tk.IntVar()
         tk.Radiobutton(self.parent, text="Add",
-                       variable=self.action, value=1,).grid(row=1, column=0,
-                                                            sticky=tk.W+tk.S)
+                       variable=self.action, value=1,
+                       indicatoron=0, width=10).grid(row=1, column=0,
+                                                     sticky=tk.W+tk.S)
         tk.Radiobutton(self.parent, text="Remove",
-                       variable=self.action, value=-1).grid(row=2, column=0,
-                                                            sticky=tk.W+tk.N)
+                       variable=self.action, value=-1,
+                       indicatoron=0, width=10).grid(row=2, column=0,
+                                                     sticky=tk.W+tk.N)
         tk.Label(self.parent, text="Amount:").grid(row=1, column=1,
                                                    sticky=tk.E)
         self.amount = tk.StringVar()
@@ -125,7 +167,9 @@ class MainApplication(tk.Frame):
         tk.Label(self.parent, text="Reason:").grid(row=2, column=1,
                                                    sticky=tk.E)
         self.reason = tk.Text(self.parent, width=25, height=4, wrap=tk.WORD)
-        self.reason.grid(row=2, column=2, sticky=tk.W)
+        self.reason.grid(row=2, column=2, columnspan=2, sticky=tk.W)
+        tk.Button(self.parent, text="Select",
+                  command=self.select).grid(row=1, column=3, sticky=tk.E)
         tk.Button(self.parent, text="Submit",
                   command=self.submit).grid(row=3, column=0)
         width, height = self.parent.grid_size()
@@ -138,9 +182,18 @@ class MainApplication(tk.Frame):
         """
         Gets a list of items in a column.
         """
+        global CURRENT_WAREHOUSE
+        if CURRENT_WAREHOUSE == 'Townsend':
+            self.inventory = WHSheet('Townsend Warehouse Inventory Sheet', 'Inventory')
+        else:
+            self.inventory = WHSheet('Lakeland Warehouse Inventory Sheet', 'Inventory')
         return self.inventory.getCol(c)
 
+    def select(self):
+        SelectWindow(self, self.item_list)
+
     def submit(self):
+        global CURRENT_WAREHOUSE
         try:
             amount = int(self.amount.get())
             if amount < 0:
@@ -163,33 +216,63 @@ class MainApplication(tk.Frame):
                 else:
                     op = '-'
                 columns = [1, 5, 10]
-                for c in columns:
-                    col = self.sheet.getCol(c)[1:]
-                    for r in range(len(col)):
-                        if col[r] == item:
-                            current = self.sheet.getValue(r+2, c+1)
-                            self.sheet.setValue(r+2, c+1,
-                                                current + op + str(amount))
-                            time = datetime.datetime.now()
-                            time = time.strftime('%m/%d/%y %I:%M %p')
-                            self.history.addRow([item,
-                                                 amount * self.action.get(),
-                                                 time,
-                                                 self.reason.get('1.0',
-                                                                 'end-1c')])
-                            return
-                tk.messagebox.showerror(TITLE, "Item not in countsheet.")
+                try:
+                    if CURRENT_WAREHOUSE == 'Townsend':
+                        self.sheet = WHSheet('Townsend Warehouse Inventory Sheet', 'Townsend Count Sheet')
+                        self.history = WHSheet('Townsend Warehouse Inventory Sheet', 'History')
+                    else:
+                        self.sheet = WHSheet('Lakeland Warehouse Inventory Sheet', 'Lakeland Count Sheet')
+                        self.history = WHSheet('Lakeland Warehouse Inventory Sheet', 'History')
+                    print(CURRENT_WAREHOUSE)
+                    for c in columns:
+                        col = self.sheet.getCol(c)[1:]
+                        for r in range(len(col)):
+                            if col[r] == item:
+                                current = self.sheet.getValue(r+2, c+1)
+                                self.sheet.setValue(r+2, c+1,
+                                                    current + op + str(amount))
+                                time = datetime.datetime.now()
+                                time = time.strftime('%m/%d/%y %I:%M %p')
+                                self.history.addRow([item,
+                                                    amount * self.action.get(),
+                                                    time,
+                                                    self.reason.get('1.0',
+                                                                    'end-1c')])
+                                tk.messagebox.showinfo(TITLE, "Successfully updated.")
+                                return
+                    tk.messagebox.showerror(TITLE, "Item not in countsheet.")
+                except requests.ConnectionError:
+                    tk.messagebox.showerror(TITLE, "Failed to add changes! Check connection.")
+
+    def townsend(self):
+        global CURRENT_WAREHOUSE
+        root.wm_title(TITLE + ' - Townsend')
+        CURRENT_WAREHOUSE = 'Townsend'
+        self.destroy()
+        self.__init__(root) #, inventory, townsend, history)
+
+
+    def lakeland(self):
+        global CURRENT_WAREHOUSE
+        root.wm_title(TITLE + ' - Lakeland')
+        CURRENT_WAREHOUSE = 'Lakeland'
+        self.destroy()
+        self.__init__(root) #, l_inventory, lakeland, l_history)
 
 
 if __name__ == '__main__':
-    townsend = WHSheet('Townsend Warehouse Inventory Sheet',
-                       'Townsend Count Sheet')
-    inventory = WHSheet('Townsend Warehouse Inventory Sheet',
-                        'Inventory')
-    history = WHSheet('Townsend Warehouse Inventory Sheet',
-                      'History')
+    RESTRICTED = False
+
     root = tk.Tk()
-    root.geometry('350x150')
-    root.wm_title(TITLE)
-    MainApplication(root, inventory, townsend, history)
+    default_font = font.nametofont('TkDefaultFont')
+    default_font.configure(size=14)
+    root.option_add('*Font', default_font)
+    root.geometry('450x250')
+    if RESTRICTED:
+        root.wm_title(TITLE + ' - Lakeland')
+        CURRENT_WAREHOUSE = 'Lakeland'
+    else:
+        root.wm_title(TITLE + ' - Townsend')
+        CURRENT_WAREHOUSE = 'Townsend'
+    MainApplication(root)
     root.mainloop()
